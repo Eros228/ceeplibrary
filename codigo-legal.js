@@ -116,12 +116,21 @@ logoutBtn.addEventListener("click", async () => {
   await signOutUser();
 });
 
+// Alterna entre a tela de login e o app, sem depender só do atributo
+// "hidden" (que pode ser sobrescrito por CSS externo) — aplica também o
+// style.display diretamente, como reforço.
+function showAuthScreen(show) {
+  authScreen.hidden = !show;
+  authScreen.style.display = show ? "grid" : "none";
+  appMain.hidden = show;
+  appMain.style.display = show ? "none" : "block";
+}
+
 // Reage a login/logout: carrega (ou limpa) a biblioteca do usuário.
 watchAuth(async (user) => {
   if (user) {
     currentUid = user.uid;
-    authScreen.hidden = true;
-    appMain.hidden = false;
+    showAuthScreen(false);
     userNameEl.textContent = user.displayName || user.email;
 
     books = await initStorage(currentUid);
@@ -132,8 +141,7 @@ watchAuth(async (user) => {
     books = [];
     searchTerm = "";
     searchInput.value = "";
-    appMain.hidden = true;
-    authScreen.hidden = false;
+    showAuthScreen(true);
     closeModals();
     loginForm.reset();
     signupForm.reset();
