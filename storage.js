@@ -34,7 +34,7 @@ const firebaseConfig = {
   storageBucket: "gerenciamento-de-livros-6c370.firebasestorage.app",
   messagingSenderId: "658863302678",
   appId: "1:658863302678:web:83d5e4165cfe19db25ed37",
-  measurementId: "G-YXFS66C45R"
+  measurementId: "G-YXFS66C45R",
 };
 
 const app = initializeApp(firebaseConfig);
