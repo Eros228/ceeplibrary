@@ -41,7 +41,14 @@ body {
 }
 
 /* ---------- Tela de login / criar conta ---------- */
+/* position: fixed garante que esta tela seja um overlay independente do
+   restante da página — mesmo que algo dê errado ao escondê-la, ela nunca
+   "empurra" o conteúdo principal para baixo nem aparece ao rolar a página. */
 .auth-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  overflow-y: auto;
   min-height: 100vh;
   display: grid;
   place-items: center;
@@ -49,8 +56,10 @@ body {
   background: radial-gradient(circle at 50% 0%, var(--rose-1) 0%, var(--cream) 55%);
 }
 
+/* !important garante que nenhuma outra regra de CSS possa acidentalmente
+   sobrepor este "display: none" enquanto a tela estiver marcada como hidden. */
 .auth-screen[hidden] {
-  display: none;
+  display: none !important;
 }
 
 .auth-card {
