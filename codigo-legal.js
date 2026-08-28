@@ -1,5 +1,9 @@
-
 import {
+  watchAuth,
+  signUp,
+  signIn,
+  signOutUser,
+  authErrorMessage,
   initStorage,
   isUsingFirestore,
   addBook as storageAddBook,
@@ -14,8 +18,20 @@ const MAX_LOAN_DAYS = 15;
 let books = [];
 let searchTerm = "";
 let lendingBookId = null;
+let currentUid = null;
 
-// ---------- Elementos ----------
+// ---------- Elementos: autenticação ----------
+const authScreen = document.getElementById("authScreen");
+const appMain = document.getElementById("appMain");
+const authTabs = document.querySelectorAll(".auth-tab");
+const loginForm = document.getElementById("loginForm");
+const signupForm = document.getElementById("signupForm");
+const loginError = document.getElementById("loginError");
+const signupError = document.getElementById("signupError");
+const userNameEl = document.getElementById("userName");
+const logoutBtn = document.getElementById("logoutBtn");
+
+// ---------- Elementos: app ----------
 const grid = document.getElementById("booksGrid");
 const emptyState = document.getElementById("emptyState");
 const legend = document.getElementById("legend");
@@ -39,15 +55,92 @@ const loansModal = document.getElementById("loansModal");
 const loansList = document.getElementById("loansList");
 const loansSubtitle = document.getElementById("loansSubtitle");
 
-const editQtyModal = document.getElementById("editQtyModal");
-const editQtyForm = document.getElementById("editQtyForm");
-const editQtyBookName = document.getElementById("editQtyBookName");
-const editQtyInput = document.getElementById("editQtyInput");
-const editQtyHint = document.getElementById("editQtyHint");
-
 let currentCoverData = null;
 let viewingLoansBookId = null;
-let editingQtyBookId = null;
+
+// ============================================================
+//  Autenticação
+// ============================================================
+
+authTabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    authTabs.forEach((t) => t.classList.remove("active"));
+    tab.classList.add("active");
+    const isLogin = tab.dataset.tab === "login";
+    loginForm.hidden = !isLogin;
+    signupForm.hidden = isLogin;
+    loginError.hidden = true;
+    signupError.hidden = true;
+  });
+});
+
+loginForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  loginError.hidden = true;
+  const email = document.getElementById("loginEmail").value.trim();
+  const password = document.getElementById("loginPassword").value;
+  const btn = loginForm.querySelector(".auth-submit");
+  btn.disabled = true;
+  try {
+    await signIn(email, password);
+    // A troca de tela acontece via watchAuth()
+  } catch (err) {
+    loginError.textContent = authErrorMessage(err);
+    loginError.hidden = false;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+signupForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  signupError.hidden = true;
+  const name = document.getElementById("signupName").value.trim();
+  const email = document.getElementById("signupEmail").value.trim();
+  const password = document.getElementById("signupPassword").value;
+  const btn = signupForm.querySelector(".auth-submit");
+  btn.disabled = true;
+  try {
+    await signUp(email, password, name);
+    // A troca de tela acontece via watchAuth()
+  } catch (err) {
+    signupError.textContent = authErrorMessage(err);
+    signupError.hidden = false;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+logoutBtn.addEventListener("click", async () => {
+  closeModals();
+  await signOutUser();
+});
+
+// Reage a login/logout: carrega (ou limpa) a biblioteca do usuário.
+watchAuth(async (user) => {
+  if (user) {
+    currentUid = user.uid;
+    authScreen.hidden = true;
+    appMain.hidden = false;
+    userNameEl.textContent = user.displayName || user.email;
+
+    books = await initStorage(currentUid);
+    console.log("[v0] Fonte de dados:", isUsingFirestore() ? "Firestore" : "localStorage");
+    render();
+  } else {
+    currentUid = null;
+    books = [];
+    searchTerm = "";
+    searchInput.value = "";
+    appMain.hidden = true;
+    authScreen.hidden = false;
+    closeModals();
+    loginForm.reset();
+    signupForm.reset();
+    loginError.hidden = true;
+    signupError.hidden = true;
+  }
+});
 
 // ---------- Utilidades ----------
 function available(book) {
@@ -65,6 +158,10 @@ function addDaysIso(iso, days) {
   const d = new Date(iso + "T00:00:00");
   d.setDate(d.getDate() + days);
   return d.toISOString().slice(0, 10);
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 // ---------- Renderização ----------
@@ -108,9 +205,6 @@ function render() {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="16" height="16" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/></svg>
           Empréstimos ${empr > 0 ? `<span class="count">${empr}</span>` : ""}
         </button>
-        <button class="btn-icon" data-action="editQty" aria-label="Alterar quantidade máxima de ${escapeHtml(book.name)}" title="Alterar quantidade máxima">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="16" height="16" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
-        </button>
         <button class="btn-icon" data-action="delete" aria-label="Excluir ${escapeHtml(book.name)}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="16" height="16" aria-hidden="true"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
         </button>
@@ -119,7 +213,6 @@ function render() {
 
     card.querySelector('[data-action="lend"]').addEventListener("click", () => openLend(book.id));
     card.querySelector('[data-action="loans"]').addEventListener("click", () => openLoans(book.id));
-    card.querySelector('[data-action="editQty"]').addEventListener("click", () => openEditQty(book.id));
     card.querySelector('[data-action="delete"]').addEventListener("click", () => deleteBook(book.id));
 
     grid.appendChild(card);
@@ -129,10 +222,6 @@ function render() {
 
   const total = books.length;
   legend.textContent = `${total} ${total === 1 ? "título cadastrado" : "títulos cadastrados"} · disp. = disponíveis, empr. = emprestados, total = total de exemplares`;
-}
-
-function escapeHtml(str) {
-  return String(str).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 // ---------- Adicionar livro ----------
@@ -150,79 +239,159 @@ coverInput.addEventListener("change", (e) => {
   reader.readAsDataURL(file);
 });
 
-// Recomenda capas conforme o usuário digita o nome do livro (Open Library)
+// ---------- Sugestão de capas (Open Library + Google Books) ----------
+// Busca em duas fontes em paralelo, remove duplicatas, prioriza títulos
+// que começam exatamente como o termo digitado, e descarta silenciosamente
+// qualquer sugestão cuja imagem falhe ao carregar.
 let coverSearchTimer = null;
 let lastCoverQuery = "";
+let coverRequestId = 0;
 
 bookNameInput.addEventListener("input", () => {
   const term = bookNameInput.value.trim();
   clearTimeout(coverSearchTimer);
-  if (term.length < 3) {
+  if (term.length < 2) {
     coverSuggestions.hidden = true;
     coverSuggestions.innerHTML = "";
+    lastCoverQuery = "";
     return;
   }
-  coverSearchTimer = setTimeout(() => fetchCoverSuggestions(term), 500);
+  coverSearchTimer = setTimeout(() => fetchCoverSuggestions(term), 400);
 });
+
+async function fetchOpenLibraryCovers(term, signal) {
+  try {
+    const url = `https://openlibrary.org/search.json?title=${encodeURIComponent(term)}&limit=10&fields=title,author_name,cover_i,first_publish_year`;
+    const res = await fetch(url, { signal });
+    const data = await res.json();
+    return (data.docs || [])
+      .filter((d) => d.cover_i)
+      .slice(0, 8)
+      .map((d) => ({
+        title: d.title,
+        author: d.author_name ? d.author_name[0] : "",
+        year: d.first_publish_year || "",
+        cover: `https://covers.openlibrary.org/b/id/${d.cover_i}-M.jpg`,
+      }));
+  } catch (err) {
+    console.log("[v0] Falha ao buscar capas na Open Library:", err);
+    return [];
+  }
+}
+
+async function fetchGoogleBooksCovers(term, signal) {
+  try {
+    const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent("intitle:" + term)}&maxResults=10`;
+    const res = await fetch(url, { signal });
+    const data = await res.json();
+    return (data.items || [])
+      .filter((it) => it.volumeInfo && it.volumeInfo.imageLinks && it.volumeInfo.imageLinks.thumbnail)
+      .slice(0, 8)
+      .map((it) => {
+        const info = it.volumeInfo;
+        return {
+          title: info.title,
+          author: info.authors ? info.authors[0] : "",
+          year: info.publishedDate ? info.publishedDate.slice(0, 4) : "",
+          cover: info.imageLinks.thumbnail.replace("http://", "https://"),
+        };
+      });
+  } catch (err) {
+    console.log("[v0] Falha ao buscar capas no Google Books:", err);
+    return [];
+  }
+}
 
 async function fetchCoverSuggestions(term) {
   if (term === lastCoverQuery) return;
   lastCoverQuery = term;
 
+  const requestId = ++coverRequestId;
+
   coverSuggestions.hidden = false;
-  coverSuggestions.innerHTML = `<p class="cover-sug-hint">Buscando capas...</p>`;
+  coverSuggestions.innerHTML = `<p class="cover-sug-hint"><span class="cover-sug-spinner" aria-hidden="true"></span>Buscando capas...</p>`;
 
-  try {
-    const url = `https://openlibrary.org/search.json?title=${encodeURIComponent(term)}&limit=8&fields=title,author_name,cover_i`;
-    // Aborta a busca se demorar mais de 6s, evitando travar em "Buscando capas..."
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000);
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
-    const data = await res.json();
+  // Aborta as buscas se demorarem mais de 6s, evitando travar em "Buscando capas..."
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 6000);
 
-    const withCover = (data.docs || []).filter((d) => d.cover_i).slice(0, 6);
+  const [openLibraryResult, googleResult] = await Promise.allSettled([
+    fetchOpenLibraryCovers(term, controller.signal),
+    fetchGoogleBooksCovers(term, controller.signal),
+  ]);
+  clearTimeout(timeout);
 
-    if (withCover.length === 0) {
-      coverSuggestions.innerHTML = `<p class="cover-sug-hint">Nenhuma capa encontrada. Você pode enviar uma imagem manualmente.</p>`;
-      return;
-    }
+  // Se o usuário já digitou outra coisa enquanto isso corria, ignora este resultado.
+  if (requestId !== coverRequestId) return;
 
-    coverSuggestions.innerHTML = `<p class="cover-sug-hint">Sugestões de capa (clique para usar):</p>`;
-    const row = document.createElement("div");
-    row.className = "cover-sug-row";
+  const combined = [
+    ...(openLibraryResult.status === "fulfilled" ? openLibraryResult.value : []),
+    ...(googleResult.status === "fulfilled" ? googleResult.value : []),
+  ];
 
-    withCover.forEach((doc) => {
-      const src = `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg`;
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "cover-sug-item";
-      btn.title = `${doc.title}${doc.author_name ? " — " + doc.author_name[0] : ""}`;
-      btn.innerHTML = `<img src="${src}" alt="Capa sugerida: ${escapeHtml(doc.title)}" loading="lazy" />`;
-      btn.addEventListener("click", () => {
-        currentCoverData = src;
-        coverPreview.src = src;
-        coverPreview.hidden = false;
-        coverSuggestions.querySelectorAll(".cover-sug-item").forEach((el) => el.classList.remove("selected"));
-        btn.classList.add("selected");
-      });
-      row.appendChild(btn);
-    });
+  // Remove duplicatas (mesmo título + autor)
+  const seen = new Set();
+  const unique = combined.filter((item) => {
+    const key = `${item.title.toLowerCase()}|${(item.author || "").toLowerCase()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
-    coverSuggestions.appendChild(row);
-  } catch (err) {
-    console.log("[v0] Falha ao buscar capas na Open Library:", err);
-    coverSuggestions.innerHTML = `<p class="cover-sug-hint">Não foi possível buscar capas agora.</p>`;
+  // Prioriza títulos que começam exatamente como o termo buscado, depois os mais curtos
+  const termLower = term.toLowerCase();
+  unique.sort((a, b) => {
+    const aStarts = a.title.toLowerCase().startsWith(termLower) ? 0 : 1;
+    const bStarts = b.title.toLowerCase().startsWith(termLower) ? 0 : 1;
+    if (aStarts !== bStarts) return aStarts - bStarts;
+    return a.title.length - b.title.length;
+  });
+
+  const top = unique.slice(0, 8);
+
+  if (top.length === 0) {
+    coverSuggestions.innerHTML = `<p class="cover-sug-hint">Nenhuma capa encontrada. Você pode enviar uma imagem manualmente.</p>`;
+    return;
   }
+
+  coverSuggestions.innerHTML = `<p class="cover-sug-hint">Sugestões de capa (clique para usar):</p>`;
+  const row = document.createElement("div");
+  row.className = "cover-sug-row";
+
+  top.forEach((item) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "cover-sug-item";
+    btn.title = `${item.title}${item.author ? " — " + item.author : ""}`;
+    btn.innerHTML = `
+      <img src="${item.cover}" alt="Capa sugerida: ${escapeHtml(item.title)}" loading="lazy" />
+      <span class="cover-sug-caption">${escapeHtml(item.title)}${item.year ? ` (${item.year})` : ""}</span>
+    `;
+
+    // Se a imagem não carregar, remove essa sugestão em vez de mostrar um ícone quebrado
+    btn.querySelector("img").addEventListener("error", () => btn.remove());
+
+    btn.addEventListener("click", () => {
+      currentCoverData = item.cover;
+      coverPreview.src = item.cover;
+      coverPreview.hidden = false;
+      coverSuggestions.querySelectorAll(".cover-sug-item").forEach((el) => el.classList.remove("selected"));
+      btn.classList.add("selected");
+    });
+    row.appendChild(btn);
+  });
+
+  coverSuggestions.appendChild(row);
 }
 
 addForm.addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (!currentUid) return;
   const name = bookNameInput.value.trim();
   const qty = Math.max(1, parseInt(document.getElementById("bookQty").value, 10) || 1);
   if (!name) return;
 
-  books = await storageAddBook(books, { name, total: qty, cover: currentCoverData });
+  books = await storageAddBook(currentUid, books, { name, total: qty, cover: currentCoverData });
   render();
   closeModals();
 });
@@ -260,6 +429,7 @@ loanDateInput.addEventListener("change", () => {
 
 lendForm.addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (!currentUid) return;
   const book = books.find((b) => b.id === lendingBookId);
   if (!book) return;
 
@@ -269,42 +439,12 @@ lendForm.addEventListener("submit", async (e) => {
   const maxDue = addDaysIso(loanDate, MAX_LOAN_DAYS);
   if (!dueDate || dueDate > maxDue) dueDate = maxDue;
 
-  books = await storageAddLoan(books, lendingBookId, {
+  books = await storageAddLoan(currentUid, books, lendingBookId, {
     name: document.getElementById("borrowerName").value.trim(),
     turma: document.getElementById("borrowerClass").value.trim(),
     loanDate,
     dueDate,
   });
-  render();
-  closeModals();
-});
-
-// ---------- Alterar quantidade máxima ----------
-function openEditQty(bookId) {
-  const book = books.find((b) => b.id === bookId);
-  if (!book) return;
-  editingQtyBookId = bookId;
-  editQtyBookName.textContent = book.name;
-  editQtyInput.value = book.total;
-  editQtyInput.min = book.loans.length > 0 ? book.loans.length : 1;
-  editQtyHint.textContent =
-    book.loans.length > 0
-      ? `Não pode ser menor que ${book.loans.length} (empréstimos ativos no momento).`
-      : "Quantidade total de exemplares deste livro.";
-  openModal(editQtyModal);
-  editQtyInput.focus();
-}
-
-editQtyForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const book = books.find((b) => b.id === editingQtyBookId);
-  if (!book) return;
-
-  const min = book.loans.length > 0 ? book.loans.length : 1;
-  let newTotal = parseInt(editQtyInput.value, 10);
-  if (!Number.isFinite(newTotal) || newTotal < min) newTotal = min;
-
-  books = await storageUpdateQty(books, editingQtyBookId, newTotal);
   render();
   closeModals();
 });
@@ -341,7 +481,8 @@ function renderLoans() {
       <button class="loan-return" type="button">Devolver</button>
     `;
     li.querySelector(".loan-return").addEventListener("click", async () => {
-      books = await storageRemoveLoan(books, book.id, loan.id);
+      if (!currentUid) return;
+      books = await storageRemoveLoan(currentUid, books, book.id, loan.id);
       renderLoans();
       render();
     });
@@ -351,10 +492,11 @@ function renderLoans() {
 
 // ---------- Excluir ----------
 async function deleteBook(bookId) {
+  if (!currentUid) return;
   const book = books.find((b) => b.id === bookId);
   if (!book) return;
   if (confirm(`Excluir "${book.name}"? Esta ação não pode ser desfeita.`)) {
-    books = await storageDeleteBook(books, bookId);
+    books = await storageDeleteBook(currentUid, books, bookId);
     render();
   }
 }
@@ -372,7 +514,7 @@ function openModal(modal) {
 }
 
 function closeModals() {
-  [addModal, lendModal, loansModal, editQtyModal].forEach((m) => (m.hidden = true));
+  [addModal, lendModal, loansModal].forEach((m) => (m.hidden = true));
   document.body.style.overflow = "";
   // reset estado do formulário de adicionar
   addForm.reset();
@@ -395,12 +537,3 @@ document.querySelectorAll(".modal-overlay").forEach((overlay) => {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeModals();
 });
-
-// ---------- Inicialização ----------
-async function init() {
-  books = await initStorage();
-  console.log("[v0] Fonte de dados:", isUsingFirestore() ? "Firestore" : "localStorage");
-  render();
-}
-
-init();
