@@ -68,7 +68,7 @@ let currentCoverData = null;
 let viewingLoansBookId = null;
 
 // ============================================================
-//  COMPRESSÃO DE IMAGENS MANUAIS
+// COMPRESSÃO DE IMAGENS MANUAIS (UPLOAD DO DISPOSITIVO)
 // ============================================================
 
 function compressImage(file, maxWidth = 400, maxHeight = 600, quality = 0.75) {
@@ -99,10 +99,10 @@ function compressImage(file, maxWidth = 400, maxHeight = 600, quality = 0.75) {
         ctx.drawImage(img, 0, 0, width, height);
         resolve(canvas.toDataURL("image/jpeg", quality));
       };
-      img.onerror = () => reject(new Error("Erro ao carregar imagem"));
+      img.onerror = () => reject(new Error("Erro ao processar imagem."));
       img.src = e.target.result;
     };
-    reader.onerror = () => reject(new Error("Erro ao ler arquivo"));
+    reader.onerror = () => reject(new Error("Erro ao ler arquivo."));
     reader.readAsDataURL(file);
   });
 }
@@ -124,38 +124,11 @@ function updateCoverPreview(src) {
 }
 
 // ============================================================
-//  SISTEMA AVANÇADO DE RECOMENDAÇÃO DE CAPAS
+// SISTEMA REFORMULADO DE RECOMENDAÇÃO DE CAPAS
 // ============================================================
 
 let coverSearchTimer = null;
-let lastCoverQuery = "";
 let coverRequestId = 0;
-
-// Limpa o título tirando ruídos para melhorar o índice de busca
-function cleanBookTitle(title) {
-  return title
-    .toLowerCase()
-    .replace(/[\(\)\[\]\{\}\:\-\–\—]/g, " ")
-    .replace(/\b(vol|volume|edição|ed)\b.*/i, "")
-    .trim();
-}
-
-// Otimização: Testa se a URL da imagem é válida e possui dimensões reais
-function isValidImageUrl(url) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      // Ignora placeholders vazios ou imagens de 1x1 pixel da Open Library
-      if (img.width > 10 && img.height > 10) {
-        resolve(true);
-      } else {
-        resolve(false);
-      }
-    };
-    img.onerror = () => resolve(false);
-    img.src = url;
-  });
-}
 
 bookNameInput.addEventListener("input", () => {
   const term = bookNameInput.value.trim();
@@ -164,116 +137,124 @@ bookNameInput.addEventListener("input", () => {
   if (term.length < 2) {
     coverSuggestions.hidden = true;
     coverSuggestions.innerHTML = "";
-    lastCoverQuery = "";
     return;
   }
 
-  // Delay inteligente de 350ms para evitar requisições desnecessárias
-  coverSearchTimer = setTimeout(() => fetchCoverSuggestions(term), 350);
+  coverSearchTimer = setTimeout(() => searchBookCovers(term), 300);
 });
 
-async function fetchGoogleBooksCovers(term, signal) {
-  try {
-    const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent("intitle:" + term)}&maxResults=8`;
-    const res = await fetch(url, { signal });
-    const data = await res.json();
-    return (data.items || [])
-      .filter((it) => it.volumeInfo && it.volumeInfo.imageLinks && it.volumeInfo.imageLinks.thumbnail)
-      .map((it) => {
-        let thumb = it.volumeInfo.imageLinks.thumbnail;
-        return thumb.replace("http://", "https://");
-      });
-  } catch (err) {
-    return [];
-  }
-}
-
-async function fetchOpenLibraryCovers(term, signal) {
-  try {
-    const url = `https://openlibrary.org/search.json?title=${encodeURIComponent(term)}&limit=8&fields=cover_i`;
-    const res = await fetch(url, { signal });
-    const data = await res.json();
-    return (data.docs || [])
-      .filter((d) => d.cover_i)
-      .map((d) => `https://covers.openlibrary.org/b/id/${d.cover_i}-M.jpg`);
-  } catch (err) {
-    return [];
-  }
-}
-
-async function fetchCoverSuggestions(term) {
-  const cleaned = cleanBookTitle(term);
-  if (cleaned === lastCoverQuery) return;
-  lastCoverQuery = cleaned;
-
+async function searchBookCovers(term) {
   const requestId = ++coverRequestId;
   coverSuggestions.hidden = false;
-  coverSuggestions.innerHTML = `<p class="cover-sug-hint"><span class="cover-sug-spinner" aria-hidden="true"></span>Recomendando capas...</p>`;
+  coverSuggestions.innerHTML = `<p class="cover-sug-hint"><span class="cover-sug-spinner" aria-hidden="true"></span>Buscando capas...</p>`;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
+  const cleanTerm = term.replace(/[^\w\sà-úÀ-Ú]/gi, " ").trim();
 
-  const [googleResult, openLibResult] = await Promise.allSettled([
-    fetchGoogleBooksCovers(cleaned, controller.signal),
-    fetchOpenLibraryCovers(cleaned, controller.signal)
+  // Executa buscas simultâneas em 3 APIs distintas
+  const results = await Promise.allSettled([
+    fetchGoogleCovers(cleanTerm),
+    fetchOpenLibraryCovers(cleanTerm),
+    fetchITunesCovers(cleanTerm),
   ]);
-  clearTimeout(timeout);
 
   if (requestId !== coverRequestId) return;
 
-  const rawList = [
-    ...(googleResult.status === "fulfilled" ? googleResult.value : []),
-    ...(openLibResult.status === "fulfilled" ? openLibResult.value : [])
-  ];
-
-  const uniqueUrls = Array.from(new Set(rawList));
-
-  // Valida em paralelo as melhores imagens
-  const validResults = [];
-  for (const url of uniqueUrls.slice(0, 8)) {
-    if (await isValidImageUrl(url)) {
-      validResults.push(url);
+  const covers = [];
+  results.forEach((res) => {
+    if (res.status === "fulfilled" && Array.isArray(res.value)) {
+      covers.push(...res.value);
     }
-    if (validResults.length >= 6) break;
-  }
+  });
 
-  if (requestId !== coverRequestId) return;
+  // Elimina duplicados mantendo a ordem de relevância
+  const uniqueCovers = Array.from(new Set(covers)).filter(Boolean);
 
-  if (validResults.length === 0) {
-    coverSuggestions.innerHTML = `<p class="cover-sug-hint">Nenhuma capa encontrada. Você pode colar um link direto ou escolher um arquivo.</p>`;
+  if (uniqueCovers.length === 0) {
+    coverSuggestions.innerHTML = `<p class="cover-sug-hint">Nenhuma capa encontrada. Envie uma foto ou cole um link direto.</p>`;
     return;
   }
 
-  // Preenche a imagem automaticamente no preview com a 1ª opção caso o usuário ainda não tenha subido arquivo
+  // Preenche automaticamente o preview com a primeira opção encontrada caso o usuário ainda não tenha subido foto
   if (!currentCoverData || !currentCoverData.startsWith("data:")) {
-    updateCoverPreview(validResults[0]);
+    updateCoverPreview(uniqueCovers[0]);
   }
 
-  coverSuggestions.innerHTML = `<p class="cover-sug-hint">Capas recomendadas (clique para escolher outra):</p>`;
+  coverSuggestions.innerHTML = `<p class="cover-sug-hint">Capas encontradas (clique para selecionar):</p>`;
   const row = document.createElement("div");
   row.className = "cover-sug-row";
 
-  validResults.forEach((coverUrl, idx) => {
+  uniqueCovers.slice(0, 8).forEach((url, idx) => {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = `cover-sug-item ${idx === 0 ? "selected" : ""}`;
-    btn.innerHTML = `<img src="${coverUrl}" alt="Capa recomendada" loading="lazy" referrerpolicy="no-referrer" />`;
-    
+
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = "Capa recomendada";
+    img.loading = "lazy";
+    img.referrerPolicy = "no-referrer";
+    // Oculta o botão se o link da imagem estiver quebrado
+    img.onerror = () => btn.remove();
+
+    btn.appendChild(img);
+
     btn.addEventListener("click", () => {
       coverInput.value = "";
       coverUrlInput.value = "";
-      updateCoverPreview(coverUrl);
+      updateCoverPreview(url);
       coverSuggestions.querySelectorAll(".cover-sug-item").forEach((el) => el.classList.remove("selected"));
       btn.classList.add("selected");
     });
+
     row.appendChild(btn);
   });
 
   coverSuggestions.appendChild(row);
 }
 
+async function fetchGoogleCovers(term) {
+  try {
+    const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(term)}&maxResults=6`);
+    const data = await res.json();
+    if (!data.items) return [];
+    return data.items
+      .map((item) => item.volumeInfo?.imageLinks?.thumbnail || item.volumeInfo?.imageLinks?.smallThumbnail)
+      .filter(Boolean)
+      .map((url) => url.replace("http://", "https://").replace("&edge=curl", ""));
+  } catch (e) {
+    return [];
+  }
+}
+
+async function fetchOpenLibraryCovers(term) {
+  try {
+    const res = await fetch(`https://openlibrary.org/search.json?q=${encodeURIComponent(term)}&limit=6`);
+    const data = await res.json();
+    if (!data.docs) return [];
+    return data.docs
+      .filter((doc) => doc.cover_i)
+      .map((doc) => `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg`);
+  } catch (e) {
+    return [];
+  }
+}
+
+async function fetchITunesCovers(term) {
+  try {
+    const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&entity=ebook&limit=6`);
+    const data = await res.json();
+    if (!data.results) return [];
+    return data.results
+      .map((item) => item.artworkUrl100)
+      .filter(Boolean)
+      .map((url) => url.replace("100x100bb", "400x400bb"));
+  } catch (e) {
+    return [];
+  }
+}
+
 // ============================================================
-//  AUTENTICAÇÃO & NAVEGAÇÃO
+// AUTENTICAÇÃO
 // ============================================================
 
 authTabs.forEach((tab) => {
@@ -385,7 +366,7 @@ navViews.forEach((btn) => {
 });
 
 // ============================================================
-//  LÓGICA DA INTERFACE DE LIVROS
+// GERENCIAMENTO DA INTERFACE E LIVROS
 // ============================================================
 
 function available(book) {
@@ -441,14 +422,15 @@ function render() {
     const disp = available(book);
     const empr = book.loans.length;
 
-    const studentsListHtml = empr > 0
-      ? `<div style="margin-top: 8px; font-size: 0.8rem; background:#faf5f0; padding:6px 10px; border-radius:6px; border:1px solid var(--line);">
+    const studentsListHtml =
+      empr > 0
+        ? `<div style="margin-top: 8px; font-size: 0.8rem; background:#faf5f0; padding:6px 10px; border-radius:6px; border:1px solid var(--line);">
           <strong>Com os alunos:</strong>
           <ul style="margin:4px 0 0; padding-left:16px;">
             ${book.loans.map((l) => `<li><b>${escapeHtml(l.name)}</b> ${l.turma ? `(${escapeHtml(l.turma)})` : ""} - até ${formatDate(l.dueDate)}</li>`).join("")}
           </ul>
          </div>`
-      : "";
+        : "";
 
     const card = document.createElement("article");
     card.className = "book-card";
@@ -497,7 +479,7 @@ function render() {
   legend.textContent = `${totalTitles} títulos cadastrados · ${totalBorrowed} exemplares atualmente emprestados`;
 }
 
-// Eventos de entrada de imagem manual ou link direto
+// Entradas de upload manual e link
 coverInput.addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
@@ -670,7 +652,6 @@ function closeModals() {
   updateCoverPreview(null);
   coverSuggestions.hidden = true;
   coverSuggestions.innerHTML = "";
-  lastCoverQuery = "";
 }
 
 document.querySelectorAll("[data-close]").forEach((el) => el.addEventListener("click", closeModals));
