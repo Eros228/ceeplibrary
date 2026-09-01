@@ -2,6 +2,7 @@ import {
   watchAuth,
   signUp,
   signIn,
+  resetPassword,
   signOutUser,
   authErrorMessage,
   initStorage,
@@ -10,7 +11,6 @@ import {
   deleteBook as storageDeleteBook,
   addLoan as storageAddLoan,
   removeLoan as storageRemoveLoan,
-  updateQty as storageUpdateQty,
 } from "./storage.js";
 
 const MAX_LOAN_DAYS = 15;
@@ -19,17 +19,25 @@ let books = [];
 let searchTerm = "";
 let lendingBookId = null;
 let currentUid = null;
+let currentView = "all"; // "all" | "loans" | "manual"
 
 // ---------- Elementos: autenticação ----------
 const authScreen = document.getElementById("authScreen");
 const appMain = document.getElementById("appMain");
-const authTabs = document.querySelectorAll(".auth-tab");
+const authTabs = document.querySelectorAll(".auth-tab:not(.nav-view)");
 const loginForm = document.getElementById("loginForm");
 const signupForm = document.getElementById("signupForm");
+const resetForm = document.getElementById("resetForm");
 const loginError = document.getElementById("loginError");
 const signupError = document.getElementById("signupError");
+const resetError = document.getElementById("resetError");
+const resetMessage = document.getElementById("resetMessage");
 const userNameEl = document.getElementById("userName");
 const logoutBtn = document.getElementById("logoutBtn");
+
+// ---------- Elementos: navegação / visões ----------
+const navViews = document.querySelectorAll(".nav-view");
+const manualSection = document.getElementById("manualSection");
 
 // ---------- Elementos: app ----------
 const grid = document.getElementById("booksGrid");
@@ -66,11 +74,14 @@ authTabs.forEach((tab) => {
   tab.addEventListener("click", () => {
     authTabs.forEach((t) => t.classList.remove("active"));
     tab.classList.add("active");
-    const isLogin = tab.dataset.tab === "login";
-    loginForm.hidden = !isLogin;
-    signupForm.hidden = isLogin;
+    const target = tab.dataset.tab;
+    loginForm.hidden = target !== "login";
+    signupForm.hidden = target !== "signup";
+    resetForm.hidden = target !== "reset";
     loginError.hidden = true;
     signupError.hidden = true;
+    resetError.hidden = true;
+    resetMessage.hidden = true;
   });
 });
 
@@ -83,7 +94,6 @@ loginForm.addEventListener("submit", async (e) => {
   btn.disabled = true;
   try {
     await signIn(email, password);
-    // A troca de tela acontece via watchAuth()
   } catch (err) {
     loginError.textContent = authErrorMessage(err);
     loginError.hidden = false;
@@ -102,10 +112,29 @@ signupForm.addEventListener("submit", async (e) => {
   btn.disabled = true;
   try {
     await signUp(email, password, name);
-    // A troca de tela acontece via watchAuth()
   } catch (err) {
     signupError.textContent = authErrorMessage(err);
     signupError.hidden = false;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+resetForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  resetError.hidden = true;
+  resetMessage.hidden = true;
+  const email = document.getElementById("resetEmail").value.trim();
+  const btn = resetForm.querySelector(".auth-submit");
+  btn.disabled = true;
+  try {
+    await resetPassword(email);
+    resetMessage.textContent = "E-mail de redefinição enviado com sucesso!";
+    resetMessage.hidden = false;
+    resetForm.reset();
+  } catch (err) {
+    resetError.textContent = authErrorMessage(err);
+    resetError.hidden = false;
   } finally {
     btn.disabled = false;
   }
@@ -116,9 +145,6 @@ logoutBtn.addEventListener("click", async () => {
   await signOutUser();
 });
 
-// Alterna entre a tela de login e o app, sem depender só do atributo
-// "hidden" (que pode ser sobrescrito por CSS externo) — aplica também o
-// style.display diretamente, como reforço.
 function showAuthScreen(show) {
   authScreen.hidden = !show;
   authScreen.style.display = show ? "grid" : "none";
@@ -126,7 +152,6 @@ function showAuthScreen(show) {
   appMain.style.display = show ? "none" : "block";
 }
 
-// Reage a login/logout: carrega (ou limpa) a biblioteca do usuário.
 watchAuth(async (user) => {
   if (user) {
     currentUid = user.uid;
@@ -134,7 +159,6 @@ watchAuth(async (user) => {
     userNameEl.textContent = user.displayName || user.email;
 
     books = await initStorage(currentUid);
-    console.log("[v0] Fonte de dados:", isUsingFirestore() ? "Firestore" : "localStorage");
     render();
   } else {
     currentUid = null;
@@ -145,9 +169,22 @@ watchAuth(async (user) => {
     closeModals();
     loginForm.reset();
     signupForm.reset();
+    resetForm.reset();
     loginError.hidden = true;
     signupError.hidden = true;
+    resetError.hidden = true;
+    resetMessage.hidden = true;
   }
+});
+
+// ---------- Navegação por Visões ----------
+navViews.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    navViews.forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    currentView = btn.dataset.view;
+    render();
+  });
 });
 
 // ---------- Utilidades ----------
@@ -161,7 +198,6 @@ function formatDate(iso) {
   return `${d}/${m}/${y}`;
 }
 
-// Retorna a data ISO (yyyy-mm-dd) somando "days" dias a uma data ISO.
 function addDaysIso(iso, days) {
   const d = new Date(iso + "T00:00:00");
   d.setDate(d.getDate() + days);
@@ -174,14 +210,49 @@ function escapeHtml(str) {
 
 // ---------- Renderização ----------
 function render() {
+  if (currentView === "manual") {
+    grid.hidden = true;
+    manualSection.hidden = false;
+    emptyState.hidden = true;
+    legend.hidden = true;
+    return;
+  }
+
+  grid.hidden = false;
+  manualSection.hidden = true;
+  legend.hidden = false;
+
   const term = searchTerm.trim().toLowerCase();
-  const filtered = books.filter((b) => b.name.toLowerCase().includes(term));
+
+  // Pesquisa expandida para nome do livro OU aluno/turma que está com o livro
+  let filtered = books.filter((b) => {
+    const matchBook = b.name.toLowerCase().includes(term);
+    const matchStudent = b.loans.some(
+      (l) => (l.name && l.name.toLowerCase().includes(term)) || (l.turma && l.turma.toLowerCase().includes(term))
+    );
+    return matchBook || matchStudent;
+  });
+
+  // Filtro da aba "Apenas Emprestados"
+  if (currentView === "loans") {
+    filtered = filtered.filter((b) => b.loans.length > 0);
+  }
 
   grid.innerHTML = "";
 
   filtered.forEach((book) => {
     const disp = available(book);
     const empr = book.loans.length;
+
+    // Lista formatada com os nomes dos alunos atualmente com este livro
+    const studentsListHtml = empr > 0
+      ? `<div style="margin-top: 8px; font-size: 0.8rem; background:#faf5f0; padding:6px 10px; border-radius:6px; border:1px solid var(--line);">
+          <strong>Com os alunos:</strong>
+          <ul style="margin:4px 0 0; padding-left:16px;">
+            ${book.loans.map((l) => `<li><b>${escapeHtml(l.name)}</b> ${l.turma ? `(${escapeHtml(l.turma)})` : ""} - até ${formatDate(l.dueDate)}</li>`).join("")}
+          </ul>
+         </div>`
+      : "";
 
     const card = document.createElement("article");
     card.className = "book-card";
@@ -203,18 +274,17 @@ function render() {
           <span><b>${empr}</b> empr.</span><span class="sep">|</span>
           <span><b>${book.total}</b> total</span>
         </div>
+        ${studentsListHtml}
       </div>
       <div class="card-actions">
         <button class="btn-action" data-action="lend" ${disp === 0 ? "disabled" : ""}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="16" height="16" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
           Emprestar
         </button>
         <button class="btn-action" data-action="loans">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="16" height="16" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/></svg>
           Empréstimos ${empr > 0 ? `<span class="count">${empr}</span>` : ""}
         </button>
         <button class="btn-icon" data-action="delete" aria-label="Excluir ${escapeHtml(book.name)}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="16" height="16" aria-hidden="true"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
         </button>
       </div>
     `;
@@ -228,8 +298,9 @@ function render() {
 
   emptyState.hidden = filtered.length !== 0;
 
-  const total = books.length;
-  legend.textContent = `${total} ${total === 1 ? "título cadastrado" : "títulos cadastrados"} · disp. = disponíveis, empr. = emprestados, total = total de exemplares`;
+  const totalTitles = books.length;
+  const totalBorrowed = books.reduce((acc, b) => acc + b.loans.length, 0);
+  legend.textContent = `${totalTitles} títulos cadastrados · ${totalBorrowed} exemplares atualmente emprestados`;
 }
 
 // ---------- Adicionar livro ----------
@@ -247,10 +318,7 @@ coverInput.addEventListener("change", (e) => {
   reader.readAsDataURL(file);
 });
 
-// ---------- Sugestão de capas (Open Library + Google Books) ----------
-// Busca em duas fontes em paralelo, remove duplicatas, prioriza títulos
-// que começam exatamente como o termo digitado, e descarta silenciosamente
-// qualquer sugestão cuja imagem falhe ao carregar.
+// ---------- Sugestões de capas ----------
 let coverSearchTimer = null;
 let lastCoverQuery = "";
 let coverRequestId = 0;
@@ -282,7 +350,6 @@ async function fetchOpenLibraryCovers(term, signal) {
         cover: `https://covers.openlibrary.org/b/id/${d.cover_i}-M.jpg`,
       }));
   } catch (err) {
-    console.log("[v0] Falha ao buscar capas na Open Library:", err);
     return [];
   }
 }
@@ -305,7 +372,6 @@ async function fetchGoogleBooksCovers(term, signal) {
         };
       });
   } catch (err) {
-    console.log("[v0] Falha ao buscar capas no Google Books:", err);
     return [];
   }
 }
@@ -315,11 +381,9 @@ async function fetchCoverSuggestions(term) {
   lastCoverQuery = term;
 
   const requestId = ++coverRequestId;
-
   coverSuggestions.hidden = false;
   coverSuggestions.innerHTML = `<p class="cover-sug-hint"><span class="cover-sug-spinner" aria-hidden="true"></span>Buscando capas...</p>`;
 
-  // Aborta as buscas se demorarem mais de 6s, evitando travar em "Buscando capas..."
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 6000);
 
@@ -329,7 +393,6 @@ async function fetchCoverSuggestions(term) {
   ]);
   clearTimeout(timeout);
 
-  // Se o usuário já digitou outra coisa enquanto isso corria, ignora este resultado.
   if (requestId !== coverRequestId) return;
 
   const combined = [
@@ -337,22 +400,12 @@ async function fetchCoverSuggestions(term) {
     ...(googleResult.status === "fulfilled" ? googleResult.value : []),
   ];
 
-  // Remove duplicatas (mesmo título + autor)
   const seen = new Set();
   const unique = combined.filter((item) => {
     const key = `${item.title.toLowerCase()}|${(item.author || "").toLowerCase()}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
-  });
-
-  // Prioriza títulos que começam exatamente como o termo buscado, depois os mais curtos
-  const termLower = term.toLowerCase();
-  unique.sort((a, b) => {
-    const aStarts = a.title.toLowerCase().startsWith(termLower) ? 0 : 1;
-    const bStarts = b.title.toLowerCase().startsWith(termLower) ? 0 : 1;
-    if (aStarts !== bStarts) return aStarts - bStarts;
-    return a.title.length - b.title.length;
   });
 
   const top = unique.slice(0, 8);
@@ -370,15 +423,7 @@ async function fetchCoverSuggestions(term) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "cover-sug-item";
-    btn.title = `${item.title}${item.author ? " — " + item.author : ""}`;
-    btn.innerHTML = `
-      <img src="${item.cover}" alt="Capa sugerida: ${escapeHtml(item.title)}" loading="lazy" />
-      <span class="cover-sug-caption">${escapeHtml(item.title)}${item.year ? ` (${item.year})` : ""}</span>
-    `;
-
-    // Se a imagem não carregar, remove essa sugestão em vez de mostrar um ícone quebrado
-    btn.querySelector("img").addEventListener("error", () => btn.remove());
-
+    btn.innerHTML = `<img src="${item.cover}" alt="Capa" loading="lazy" />`;
     btn.addEventListener("click", () => {
       currentCoverData = item.cover;
       coverPreview.src = item.cover;
@@ -415,16 +460,14 @@ function openLend(bookId) {
   const today = new Date().toISOString().slice(0, 10);
   loanDateInput.value = today;
 
-  // Pré-seleciona a devolução em 15 dias e limita o máximo a 15 dias
   const maxDue = addDaysIso(today, MAX_LOAN_DAYS);
-  dueDateInput.value = maxDue;   // valor sugerido
-  dueDateInput.min = today;      // não pode ser antes do empréstimo
-  dueDateInput.max = maxDue;     // no máximo 15 dias
+  dueDateInput.value = maxDue;
+  dueDateInput.min = today;
+  dueDateInput.max = maxDue;
 
   openModal(lendModal);
 }
 
-// Quando a data do empréstimo muda, recalcula o limite de 15 dias
 loanDateInput.addEventListener("change", () => {
   const base = loanDateInput.value || new Date().toISOString().slice(0, 10);
   const maxDue = addDaysIso(base, MAX_LOAN_DAYS);
@@ -441,7 +484,6 @@ lendForm.addEventListener("submit", async (e) => {
   const book = books.find((b) => b.id === lendingBookId);
   if (!book) return;
 
-  // Garante o teto de 15 dias mesmo que o campo seja alterado manualmente
   const loanDate = loanDateInput.value;
   let dueDate = dueDateInput.value;
   const maxDue = addDaysIso(loanDate, MAX_LOAN_DAYS);
@@ -515,7 +557,7 @@ searchInput.addEventListener("input", (e) => {
   render();
 });
 
-// ---------- Modais (helpers) ----------
+// ---------- Helpers de Modal ----------
 function openModal(modal) {
   modal.hidden = false;
   document.body.style.overflow = "hidden";
@@ -524,7 +566,6 @@ function openModal(modal) {
 function closeModals() {
   [addModal, lendModal, loansModal].forEach((m) => (m.hidden = true));
   document.body.style.overflow = "";
-  // reset estado do formulário de adicionar
   addForm.reset();
   currentCoverData = null;
   coverPreview.hidden = true;
