@@ -1,18 +1,10 @@
-// ============================================================
-//  Camada de armazenamento e autenticação do CEEP's Library
-//  - Login por e-mail/senha via Firebase Authentication.
-//  - Cada usuário tem sua própria "biblioteca", guardada em
-//    users/{uid}/books/{bookId} no Firestore.
-//  - Se o Firestore não estiver acessível, cai para localStorage,
-//    isolado por usuário (a chave inclui o uid).
-// ============================================================
-
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
 import {
   getAuth,
   onAuthStateChanged,
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
+  sendPasswordResetEmail, // <-- Adicionado
   signOut as firebaseSignOut,
   updateProfile,
 } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
@@ -26,7 +18,6 @@ import {
   doc,
 } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
-// >>> Configuração do seu projeto Firebase (Console > Configurações do projeto)
 const firebaseConfig = {
   apiKey: "AIzaSyD_N7a1MfDw4XRppIsLajd39dEng_zkYkI",
   authDomain: "gerenciamento-de-livros-6c370.firebaseapp.com",
@@ -47,7 +38,7 @@ try {
   console.log("[v0] Firestore indisponível:", e.message);
 }
 
-let mode = "cloud"; // "cloud" (Firestore) ou "local" (localStorage)
+let mode = "cloud";
 let currentUser = null;
 
 function uid() {
@@ -58,7 +49,6 @@ function localKey(userUid) {
   return `ceeps-library-books-${userUid}`;
 }
 
-// Dados iniciais (usados só no modo localStorage, na 1ª vez de cada usuário)
 function seedBooks() {
   return [
     { id: uid(), name: "Dom Casmurro", total: 5, cover: null, loans: [] },
@@ -66,7 +56,6 @@ function seedBooks() {
   ];
 }
 
-// ---------- localStorage helpers (isolados por usuário) ----------
 function readLocal(userUid) {
   try {
     const raw = localStorage.getItem(localKey(userUid));
@@ -85,7 +74,6 @@ function writeLocal(userUid, books) {
   }
 }
 
-// ---------- Firestore helpers ----------
 function booksCollection(userUid) {
   return collection(db, "users", userUid, "books");
 }
@@ -95,12 +83,6 @@ async function fetchAllBooks(userUid) {
   return snap.docs.map((d) => ({ id: d.id, loans: [], ...d.data() }));
 }
 
-// ============================================================
-//  Autenticação
-// ============================================================
-
-// Chama callback(user | null) imediatamente e sempre que o login mudar.
-// Retorna uma função para cancelar a inscrição, se precisar.
 export function watchAuth(callback) {
   return onAuthStateChanged(auth, (user) => {
     currentUser = user;
@@ -125,11 +107,15 @@ export async function signIn(email, password) {
   return cred.user;
 }
 
+// Envia o e-mail de redefinição de senha
+export async function resetPassword(email) {
+  await sendPasswordResetEmail(auth, email);
+}
+
 export async function signOutUser() {
   await firebaseSignOut(auth);
 }
 
-// Traduz os códigos de erro do Firebase Auth para mensagens em pt-BR.
 export function authErrorMessage(err) {
   const map = {
     "auth/invalid-email": "E-mail inválido.",
@@ -145,17 +131,11 @@ export function authErrorMessage(err) {
   return map[err.code] || "Não foi possível concluir a operação. Tente novamente.";
 }
 
-// ============================================================
-//  Biblioteca (por usuário)
-// ============================================================
-
-// Carrega os livros do usuário logado (Firestore, com fallback local).
 export async function initStorage(userUid) {
   if (db) {
     try {
       const books = await fetchAllBooks(userUid);
       mode = "cloud";
-      console.log("[v0] Conectado ao Firebase Firestore.");
       return books;
     } catch (e) {
       console.log("[v0] Firestore indisponível — usando localStorage.", e.message);
@@ -170,13 +150,9 @@ export async function initStorage(userUid) {
   return local;
 }
 
-// Retorna true quando os dados estão vindo do Firestore (nuvem).
 export function isUsingFirestore() {
   return mode === "cloud";
 }
-
-// Cada operação recebe o uid do usuário dono da biblioteca e o array
-// atual "books" (usado apenas no modo local) e devolve o array atualizado.
 
 export async function addBook(userUid, books, { name, total, cover }) {
   if (mode === "cloud") {
