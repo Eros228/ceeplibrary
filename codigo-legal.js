@@ -20,7 +20,7 @@ let lendingBookId = null;
 let currentUid = null;
 let currentView = "all";
 
-// ---------- Elementos ----------
+// ---------- Elementos DOM ----------
 const authScreen = document.getElementById("authScreen");
 const appMain = document.getElementById("appMain");
 const authTabs = document.querySelectorAll(".auth-tab:not(.nav-view)");
@@ -68,7 +68,7 @@ let currentCoverData = null;
 let viewingLoansBookId = null;
 
 // ============================================================
-// COMPRESSÃO DE IMAGENS MANUAIS (UPLOAD DO DISPOSITIVO)
+// COMPRESSÃO DE IMAGENS (UPLOAD DO DISPOSITIVO)
 // ============================================================
 
 function compressImage(file, maxWidth = 400, maxHeight = 600, quality = 0.75) {
@@ -99,10 +99,10 @@ function compressImage(file, maxWidth = 400, maxHeight = 600, quality = 0.75) {
         ctx.drawImage(img, 0, 0, width, height);
         resolve(canvas.toDataURL("image/jpeg", quality));
       };
-      img.onerror = () => reject(new Error("Erro ao processar imagem."));
+      img.onerror = () => reject(new Error("Erro ao carregar imagem"));
       img.src = e.target.result;
     };
-    reader.onerror = () => reject(new Error("Erro ao ler arquivo."));
+    reader.onerror = () => reject(new Error("Erro ao ler arquivo"));
     reader.readAsDataURL(file);
   });
 }
@@ -124,77 +124,89 @@ function updateCoverPreview(src) {
 }
 
 // ============================================================
-// SISTEMA REFORMULADO DE RECOMENDAÇÃO DE CAPAS
+// NOVO SISTEMA DE RECOMENDAÇÃO (RESISTENTE A FALHAS)
 // ============================================================
 
-let coverSearchTimer = null;
-let coverRequestId = 0;
+let searchDebounce = null;
+let currentSearchId = 0;
 
 bookNameInput.addEventListener("input", () => {
-  const term = bookNameInput.value.trim();
-  clearTimeout(coverSearchTimer);
+  const query = bookNameInput.value.trim();
+  clearTimeout(searchDebounce);
 
-  if (term.length < 2) {
+  if (query.length < 2) {
     coverSuggestions.hidden = true;
     coverSuggestions.innerHTML = "";
     return;
   }
 
-  coverSearchTimer = setTimeout(() => searchBookCovers(term), 300);
+  searchDebounce = setTimeout(() => fetchBookCovers(query), 350);
 });
 
-async function searchBookCovers(term) {
-  const requestId = ++coverRequestId;
+async function fetchBookCovers(query) {
+  const searchId = ++currentSearchId;
   coverSuggestions.hidden = false;
-  coverSuggestions.innerHTML = `<p class="cover-sug-hint"><span class="cover-sug-spinner" aria-hidden="true"></span>Buscando capas...</p>`;
+  coverSuggestions.innerHTML = `<p class="cover-sug-hint"><span class="cover-sug-spinner" aria-hidden="true"></span>Procurando capas...</p>`;
 
-  const cleanTerm = term.replace(/[^\w\sà-úÀ-Ú]/gi, " ").trim();
+  const cleanQuery = query.replace(/[^\w\sà-úÀ-Ú]/gi, " ").trim();
 
-  // Executa buscas simultâneas em 3 APIs distintas
-  const results = await Promise.allSettled([
-    fetchGoogleCovers(cleanTerm),
-    fetchOpenLibraryCovers(cleanTerm),
-    fetchITunesCovers(cleanTerm),
-  ]);
+  // Executa requisições individuais com tratamento de erro independente
+  const googlePromise = fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(cleanQuery)}&maxResults=5`)
+    .then((r) => r.json())
+    .then((d) => (d.items || []).map((i) => i.volumeInfo?.imageLinks?.thumbnail?.replace("http://", "https://")).filter(Boolean))
+    .catch(() => []);
 
-  if (requestId !== coverRequestId) return;
+  const openLibPromise = fetch(`https://openlibrary.org/search.json?q=${encodeURIComponent(cleanQuery)}&limit=5`)
+    .then((r) => r.json())
+    .then((d) => (d.docs || []).map((doc) => doc.cover_i ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg` : null).filter(Boolean))
+    .catch(() => []);
 
-  const covers = [];
-  results.forEach((res) => {
-    if (res.status === "fulfilled" && Array.isArray(res.value)) {
-      covers.push(...res.value);
-    }
-  });
+  const wikiPromise = fetch(`https://pt.wikipedia.org/w/api.php?action=query&format=json&origin=*&generator=search&gsrnamespace=0&gsrlimit=3&gsrsearch=${encodeURIComponent(cleanQuery)}&prop=pageimages&piprop=thumbnail&pithumbsize=400`)
+    .then((r) => r.json())
+    .then((d) => {
+      if (!d.query?.pages) return [];
+      return Object.values(d.query.pages).map((p) => p.thumbnail?.source).filter(Boolean);
+    })
+    .catch(() => []);
 
-  // Elimina duplicados mantendo a ordem de relevância
-  const uniqueCovers = Array.from(new Set(covers)).filter(Boolean);
+  const [google, openLib, wiki] = await Promise.all([googlePromise, openLibPromise, wikiPromise]);
 
-  if (uniqueCovers.length === 0) {
-    coverSuggestions.innerHTML = `<p class="cover-sug-hint">Nenhuma capa encontrada. Envie uma foto ou cole um link direto.</p>`;
+  if (searchId !== currentSearchId) return;
+
+  const allCovers = Array.from(new Set([...google, ...openLib, ...wiki]));
+
+  if (allCovers.length === 0) {
+    coverSuggestions.innerHTML = `<p class="cover-sug-hint">Nenhuma capa encontrada. Digite a URL ou faça upload de um arquivo.</p>`;
     return;
   }
 
-  // Preenche automaticamente o preview com a primeira opção encontrada caso o usuário ainda não tenha subido foto
+  // Define a 1ª opção encontrada no preview de forma imediata
   if (!currentCoverData || !currentCoverData.startsWith("data:")) {
-    updateCoverPreview(uniqueCovers[0]);
+    updateCoverPreview(allCovers[0]);
   }
 
-  coverSuggestions.innerHTML = `<p class="cover-sug-hint">Capas encontradas (clique para selecionar):</p>`;
+  coverSuggestions.innerHTML = `<p class="cover-sug-hint">Sugestões (clique em uma para selecionar):</p>`;
   const row = document.createElement("div");
   row.className = "cover-sug-row";
 
-  uniqueCovers.slice(0, 8).forEach((url, idx) => {
+  allCovers.slice(0, 8).forEach((url, index) => {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = `cover-sug-item ${idx === 0 ? "selected" : ""}`;
+    btn.className = `cover-sug-item ${index === 0 ? "selected" : ""}`;
 
     const img = document.createElement("img");
     img.src = url;
     img.alt = "Capa recomendada";
     img.loading = "lazy";
     img.referrerPolicy = "no-referrer";
-    // Oculta o botão se o link da imagem estiver quebrado
-    img.onerror = () => btn.remove();
+
+    // Se o link da imagem quebrar, remove a miniatura do painel silenciosamente
+    img.onerror = () => {
+      btn.remove();
+      if (row.children.length === 0) {
+        coverSuggestions.innerHTML = `<p class="cover-sug-hint">Nenhuma capa disponível. Faça o upload manual.</p>`;
+      }
+    };
 
     btn.appendChild(img);
 
@@ -210,47 +222,6 @@ async function searchBookCovers(term) {
   });
 
   coverSuggestions.appendChild(row);
-}
-
-async function fetchGoogleCovers(term) {
-  try {
-    const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(term)}&maxResults=6`);
-    const data = await res.json();
-    if (!data.items) return [];
-    return data.items
-      .map((item) => item.volumeInfo?.imageLinks?.thumbnail || item.volumeInfo?.imageLinks?.smallThumbnail)
-      .filter(Boolean)
-      .map((url) => url.replace("http://", "https://").replace("&edge=curl", ""));
-  } catch (e) {
-    return [];
-  }
-}
-
-async function fetchOpenLibraryCovers(term) {
-  try {
-    const res = await fetch(`https://openlibrary.org/search.json?q=${encodeURIComponent(term)}&limit=6`);
-    const data = await res.json();
-    if (!data.docs) return [];
-    return data.docs
-      .filter((doc) => doc.cover_i)
-      .map((doc) => `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg`);
-  } catch (e) {
-    return [];
-  }
-}
-
-async function fetchITunesCovers(term) {
-  try {
-    const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&entity=ebook&limit=6`);
-    const data = await res.json();
-    if (!data.results) return [];
-    return data.results
-      .map((item) => item.artworkUrl100)
-      .filter(Boolean)
-      .map((url) => url.replace("100x100bb", "400x400bb"));
-  } catch (e) {
-    return [];
-  }
 }
 
 // ============================================================
