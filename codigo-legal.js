@@ -18,9 +18,9 @@ let books = [];
 let searchTerm = "";
 let lendingBookId = null;
 let currentUid = null;
-let currentView = "all"; // "all" | "loans" | "manual"
+let currentView = "all";
 
-// ---------- Elementos: autenticação ----------
+// ---------- Elementos ----------
 const authScreen = document.getElementById("authScreen");
 const appMain = document.getElementById("appMain");
 const authTabs = document.querySelectorAll(".auth-tab:not(.nav-view)");
@@ -34,11 +34,9 @@ const resetMessage = document.getElementById("resetMessage");
 const userNameEl = document.getElementById("userName");
 const logoutBtn = document.getElementById("logoutBtn");
 
-// ---------- Elementos: navegação ----------
 const navViews = document.querySelectorAll(".nav-view");
 const manualSection = document.getElementById("manualSection");
 
-// ---------- Elementos: app ----------
 const grid = document.getElementById("booksGrid");
 const emptyState = document.getElementById("emptyState");
 const legend = document.getElementById("legend");
@@ -70,10 +68,9 @@ let currentCoverData = null;
 let viewingLoansBookId = null;
 
 // ============================================================
-//  COMPRESSÃO E TRATAMENTO DE IMAGENS
+//  COMPRESSÃO DE IMAGENS MANUAIS
 // ============================================================
 
-// Redimensiona e comprime imagens do computador para caberem no Firestore (< 50KB)
 function compressImage(file, maxWidth = 400, maxHeight = 600, quality = 0.75) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -100,14 +97,12 @@ function compressImage(file, maxWidth = 400, maxHeight = 600, quality = 0.75) {
         canvas.height = height;
         const ctx = canvas.getContext("2d");
         ctx.drawImage(img, 0, 0, width, height);
-
-        // Retorna como imagem JPEG otimizada
         resolve(canvas.toDataURL("image/jpeg", quality));
       };
-      img.onerror = () => reject(new Error("Erro ao carregar a imagem selecionada."));
+      img.onerror = () => reject(new Error("Erro ao carregar imagem"));
       img.src = e.target.result;
     };
-    reader.onerror = () => reject(new Error("Erro ao ler o arquivo."));
+    reader.onerror = () => reject(new Error("Erro ao ler arquivo"));
     reader.readAsDataURL(file);
   });
 }
@@ -129,7 +124,156 @@ function updateCoverPreview(src) {
 }
 
 // ============================================================
-//  Autenticação
+//  SISTEMA AVANÇADO DE RECOMENDAÇÃO DE CAPAS
+// ============================================================
+
+let coverSearchTimer = null;
+let lastCoverQuery = "";
+let coverRequestId = 0;
+
+// Limpa o título tirando ruídos para melhorar o índice de busca
+function cleanBookTitle(title) {
+  return title
+    .toLowerCase()
+    .replace(/[\(\)\[\]\{\}\:\-\–\—]/g, " ")
+    .replace(/\b(vol|volume|edição|ed)\b.*/i, "")
+    .trim();
+}
+
+// Otimização: Testa se a URL da imagem é válida e possui dimensões reais
+function isValidImageUrl(url) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      // Ignora placeholders vazios ou imagens de 1x1 pixel da Open Library
+      if (img.width > 10 && img.height > 10) {
+        resolve(true);
+      } else {
+        resolve(false);
+      }
+    };
+    img.onerror = () => resolve(false);
+    img.src = url;
+  });
+}
+
+bookNameInput.addEventListener("input", () => {
+  const term = bookNameInput.value.trim();
+  clearTimeout(coverSearchTimer);
+
+  if (term.length < 2) {
+    coverSuggestions.hidden = true;
+    coverSuggestions.innerHTML = "";
+    lastCoverQuery = "";
+    return;
+  }
+
+  // Delay inteligente de 350ms para evitar requisições desnecessárias
+  coverSearchTimer = setTimeout(() => fetchCoverSuggestions(term), 350);
+});
+
+async function fetchGoogleBooksCovers(term, signal) {
+  try {
+    const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent("intitle:" + term)}&maxResults=8`;
+    const res = await fetch(url, { signal });
+    const data = await res.json();
+    return (data.items || [])
+      .filter((it) => it.volumeInfo && it.volumeInfo.imageLinks && it.volumeInfo.imageLinks.thumbnail)
+      .map((it) => {
+        let thumb = it.volumeInfo.imageLinks.thumbnail;
+        return thumb.replace("http://", "https://");
+      });
+  } catch (err) {
+    return [];
+  }
+}
+
+async function fetchOpenLibraryCovers(term, signal) {
+  try {
+    const url = `https://openlibrary.org/search.json?title=${encodeURIComponent(term)}&limit=8&fields=cover_i`;
+    const res = await fetch(url, { signal });
+    const data = await res.json();
+    return (data.docs || [])
+      .filter((d) => d.cover_i)
+      .map((d) => `https://covers.openlibrary.org/b/id/${d.cover_i}-M.jpg`);
+  } catch (err) {
+    return [];
+  }
+}
+
+async function fetchCoverSuggestions(term) {
+  const cleaned = cleanBookTitle(term);
+  if (cleaned === lastCoverQuery) return;
+  lastCoverQuery = cleaned;
+
+  const requestId = ++coverRequestId;
+  coverSuggestions.hidden = false;
+  coverSuggestions.innerHTML = `<p class="cover-sug-hint"><span class="cover-sug-spinner" aria-hidden="true"></span>Recomendando capas...</p>`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+
+  const [googleResult, openLibResult] = await Promise.allSettled([
+    fetchGoogleBooksCovers(cleaned, controller.signal),
+    fetchOpenLibraryCovers(cleaned, controller.signal)
+  ]);
+  clearTimeout(timeout);
+
+  if (requestId !== coverRequestId) return;
+
+  const rawList = [
+    ...(googleResult.status === "fulfilled" ? googleResult.value : []),
+    ...(openLibResult.status === "fulfilled" ? openLibResult.value : [])
+  ];
+
+  const uniqueUrls = Array.from(new Set(rawList));
+
+  // Valida em paralelo as melhores imagens
+  const validResults = [];
+  for (const url of uniqueUrls.slice(0, 8)) {
+    if (await isValidImageUrl(url)) {
+      validResults.push(url);
+    }
+    if (validResults.length >= 6) break;
+  }
+
+  if (requestId !== coverRequestId) return;
+
+  if (validResults.length === 0) {
+    coverSuggestions.innerHTML = `<p class="cover-sug-hint">Nenhuma capa encontrada. Você pode colar um link direto ou escolher um arquivo.</p>`;
+    return;
+  }
+
+  // Preenche a imagem automaticamente no preview com a 1ª opção caso o usuário ainda não tenha subido arquivo
+  if (!currentCoverData || !currentCoverData.startsWith("data:")) {
+    updateCoverPreview(validResults[0]);
+  }
+
+  coverSuggestions.innerHTML = `<p class="cover-sug-hint">Capas recomendadas (clique para escolher outra):</p>`;
+  const row = document.createElement("div");
+  row.className = "cover-sug-row";
+
+  validResults.forEach((coverUrl, idx) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `cover-sug-item ${idx === 0 ? "selected" : ""}`;
+    btn.innerHTML = `<img src="${coverUrl}" alt="Capa recomendada" loading="lazy" referrerpolicy="no-referrer" />`;
+    
+    btn.addEventListener("click", () => {
+      coverInput.value = "";
+      coverUrlInput.value = "";
+      updateCoverPreview(coverUrl);
+      coverSuggestions.querySelectorAll(".cover-sug-item").forEach((el) => el.classList.remove("selected"));
+      btn.classList.add("selected");
+    });
+    row.appendChild(btn);
+  });
+
+  coverSuggestions.appendChild(row);
+}
+
+// ============================================================
+//  AUTENTICAÇÃO & NAVEGAÇÃO
 // ============================================================
 
 authTabs.forEach((tab) => {
@@ -191,7 +335,7 @@ resetForm.addEventListener("submit", async (e) => {
   btn.disabled = true;
   try {
     await resetPassword(email);
-    resetMessage.textContent = "E-mail de redefinição enviado com sucesso!";
+    resetMessage.textContent = "E-mail de redefinição enviado!";
     resetMessage.hidden = false;
     resetForm.reset();
   } catch (err) {
@@ -219,7 +363,6 @@ watchAuth(async (user) => {
     currentUid = user.uid;
     showAuthScreen(false);
     userNameEl.textContent = user.displayName || user.email;
-
     books = await initStorage(currentUid);
     render();
   } else {
@@ -229,17 +372,9 @@ watchAuth(async (user) => {
     searchInput.value = "";
     showAuthScreen(true);
     closeModals();
-    loginForm.reset();
-    signupForm.reset();
-    resetForm.reset();
-    loginError.hidden = true;
-    signupError.hidden = true;
-    resetError.hidden = true;
-    resetMessage.hidden = true;
   }
 });
 
-// ---------- Navegação por Visões ----------
 navViews.forEach((btn) => {
   btn.addEventListener("click", () => {
     navViews.forEach((b) => b.classList.remove("active"));
@@ -249,7 +384,10 @@ navViews.forEach((btn) => {
   });
 });
 
-// ---------- Utilidades ----------
+// ============================================================
+//  LÓGICA DA INTERFACE DE LIVROS
+// ============================================================
+
 function available(book) {
   return book.total - book.loans.length;
 }
@@ -270,7 +408,6 @@ function escapeHtml(str) {
   return String(str || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-// ---------- Renderização ----------
 function render() {
   if (currentView === "manual") {
     grid.hidden = true;
@@ -317,7 +454,6 @@ function render() {
     card.className = "book-card";
     card.innerHTML = `
       <div class="card-cover">
-        <input type="checkbox" class="card-checkbox" aria-label="Selecionar ${escapeHtml(book.name)}" />
         <span class="avail-badge ${disp === 0 ? "zero" : ""}">${disp} disp.</span>
         <svg class="cover-fallback" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="52" height="52" aria-hidden="true" ${book.cover ? 'style="display:none"' : ""}><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
         ${
@@ -356,30 +492,24 @@ function render() {
   });
 
   emptyState.hidden = filtered.length !== 0;
-
   const totalTitles = books.length;
   const totalBorrowed = books.reduce((acc, b) => acc + b.loans.length, 0);
   legend.textContent = `${totalTitles} títulos cadastrados · ${totalBorrowed} exemplares atualmente emprestados`;
 }
 
-// ---------- Adicionar livro & gerenciar capas ----------
-document.getElementById("openAddBtn").addEventListener("click", () => openModal(addModal));
-
-// Upload de arquivo com compressão automática
+// Eventos de entrada de imagem manual ou link direto
 coverInput.addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
-
   try {
     const compressed = await compressImage(file);
     coverUrlInput.value = "";
     updateCoverPreview(compressed);
   } catch (err) {
-    alert("Não foi possível carregar esta imagem. Tente outro arquivo.");
+    alert("Não foi possível carregar a imagem.");
   }
 });
 
-// URL inserida manualmente
 coverUrlInput.addEventListener("input", () => {
   const url = coverUrlInput.value.trim();
   if (url) {
@@ -390,7 +520,6 @@ coverUrlInput.addEventListener("input", () => {
   }
 });
 
-// Botão de remover imagem
 if (removeCoverBtn) {
   removeCoverBtn.addEventListener("click", () => {
     coverInput.value = "";
@@ -399,122 +528,7 @@ if (removeCoverBtn) {
   });
 }
 
-// ---------- Sugestões de capas via APIs ----------
-let coverSearchTimer = null;
-let lastCoverQuery = "";
-let coverRequestId = 0;
-
-bookNameInput.addEventListener("input", () => {
-  const term = bookNameInput.value.trim();
-  clearTimeout(coverSearchTimer);
-  if (term.length < 2) {
-    coverSuggestions.hidden = true;
-    coverSuggestions.innerHTML = "";
-    lastCoverQuery = "";
-    return;
-  }
-  coverSearchTimer = setTimeout(() => fetchCoverSuggestions(term), 400);
-});
-
-async function fetchOpenLibraryCovers(term, signal) {
-  try {
-    const url = `https://openlibrary.org/search.json?title=${encodeURIComponent(term)}&limit=10&fields=title,author_name,cover_i,first_publish_year`;
-    const res = await fetch(url, { signal });
-    const data = await res.json();
-    return (data.docs || [])
-      .filter((d) => d.cover_i)
-      .slice(0, 8)
-      .map((d) => ({
-        title: d.title,
-        cover: `https://covers.openlibrary.org/b/id/${d.cover_i}-M.jpg`,
-      }));
-  } catch (err) {
-    return [];
-  }
-}
-
-async function fetchGoogleBooksCovers(term, signal) {
-  try {
-    const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent("intitle:" + term)}&maxResults=10`;
-    const res = await fetch(url, { signal });
-    const data = await res.json();
-    return (data.items || [])
-      .filter((it) => it.volumeInfo && it.volumeInfo.imageLinks && it.volumeInfo.imageLinks.thumbnail)
-      .slice(0, 8)
-      .map((it) => {
-        let thumb = it.volumeInfo.imageLinks.thumbnail;
-        if (thumb.startsWith("http://")) {
-          thumb = thumb.replace("http://", "https://");
-        }
-        return {
-          title: it.volumeInfo.title,
-          cover: thumb,
-        };
-      });
-  } catch (err) {
-    return [];
-  }
-}
-
-async function fetchCoverSuggestions(term) {
-  if (term === lastCoverQuery) return;
-  lastCoverQuery = term;
-
-  const requestId = ++coverRequestId;
-  coverSuggestions.hidden = false;
-  coverSuggestions.innerHTML = `<p class="cover-sug-hint"><span class="cover-sug-spinner" aria-hidden="true"></span>Buscando capas...</p>`;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 6000);
-
-  const [openLibraryResult, googleResult] = await Promise.allSettled([
-    fetchOpenLibraryCovers(term, controller.signal),
-    fetchGoogleBooksCovers(term, controller.signal),
-  ]);
-  clearTimeout(timeout);
-
-  if (requestId !== coverRequestId) return;
-
-  const combined = [
-    ...(openLibraryResult.status === "fulfilled" ? openLibraryResult.value : []),
-    ...(googleResult.status === "fulfilled" ? googleResult.value : []),
-  ];
-
-  const seen = new Set();
-  const unique = combined.filter((item) => {
-    if (seen.has(item.cover)) return false;
-    seen.add(item.cover);
-    return true;
-  });
-
-  const top = unique.slice(0, 8);
-
-  if (top.length === 0) {
-    coverSuggestions.innerHTML = `<p class="cover-sug-hint">Nenhuma capa encontrada automaticamente. Você pode escolher uma imagem ou colar um link.</p>`;
-    return;
-  }
-
-  coverSuggestions.innerHTML = `<p class="cover-sug-hint">Sugestões de capa (clique para usar):</p>`;
-  const row = document.createElement("div");
-  row.className = "cover-sug-row";
-
-  top.forEach((item) => {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "cover-sug-item";
-    btn.innerHTML = `<img src="${item.cover}" alt="Capa" loading="lazy" referrerpolicy="no-referrer" />`;
-    btn.addEventListener("click", () => {
-      coverInput.value = "";
-      coverUrlInput.value = "";
-      updateCoverPreview(item.cover);
-      coverSuggestions.querySelectorAll(".cover-sug-item").forEach((el) => el.classList.remove("selected"));
-      btn.classList.add("selected");
-    });
-    row.appendChild(btn);
-  });
-
-  coverSuggestions.appendChild(row);
-}
+document.getElementById("openAddBtn").addEventListener("click", () => openModal(addModal));
 
 addForm.addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -532,14 +546,14 @@ addForm.addEventListener("submit", async (e) => {
     render();
     closeModals();
   } catch (err) {
-    alert("Erro ao salvar o livro. " + (err.message || "Tente novamente."));
+    alert("Erro ao salvar o livro: " + (err.message || "Tente novamente."));
   } finally {
     saveBookBtn.disabled = false;
     saveBookBtn.textContent = "Adicionar livro";
   }
 });
 
-// ---------- Emprestar livro ----------
+// ---------- Empréstimos & Exclusão ----------
 function openLend(bookId) {
   const book = books.find((b) => b.id === bookId);
   if (!book || available(book) === 0) return;
@@ -589,7 +603,6 @@ lendForm.addEventListener("submit", async (e) => {
   closeModals();
 });
 
-// ---------- Lista de empréstimos ----------
 function openLoans(bookId) {
   const book = books.find((b) => b.id === bookId);
   if (!book) return;
@@ -630,7 +643,6 @@ function renderLoans() {
   });
 }
 
-// ---------- Excluir ----------
 async function deleteBook(bookId) {
   if (!currentUid) return;
   const book = books.find((b) => b.id === bookId);
@@ -641,13 +653,11 @@ async function deleteBook(bookId) {
   }
 }
 
-// ---------- Busca ----------
 searchInput.addEventListener("input", (e) => {
   searchTerm = e.target.value;
   render();
 });
 
-// ---------- Helpers de Modal ----------
 function openModal(modal) {
   modal.hidden = false;
   document.body.style.overflow = "hidden";
